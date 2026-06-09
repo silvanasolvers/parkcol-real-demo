@@ -112,6 +112,7 @@ function renderDashboard() {
             <select id="typeInput">
               <option ${selected?.vehicle_type === 'Carro' ? 'selected' : ''}>Carro</option>
               <option ${selected?.vehicle_type === 'Moto' ? 'selected' : ''}>Moto</option>
+              <option ${selected?.vehicle_type === 'Por confirmar' ? 'selected' : ''}>Por confirmar</option>
             </select>
             <label>Servicio</label>
             <select id="serviceInput">
@@ -326,7 +327,7 @@ function applyDetection(detected, auto) {
   const typeInput = $('#typeInput');
   const serviceInput = $('#serviceInput');
   plateInput.value = detected.plate;
-  typeInput.value = detected.type || typeInput.value;
+  typeInput.value = detected.type || 'Por confirmar';
   if (detected.source === 'openai_vision' && detected.confidence >= 0.78) {
     serviceInput.value = serviceInput.value || 'Horas';
   }
@@ -335,7 +336,7 @@ function applyDetection(detected, auto) {
   const changed = lastDetectedPlate !== detected.plate;
   lastDetectedPlate = detected.plate;
   if (changed || !auto) {
-    setResult(`Placa detectada automáticamente: ${detected.plate} (${pct}%). ${details}`);
+    setResult(`Placa detectada automáticamente: ${detected.plate} (${pct}%). ${details || 'Tipo/color/marca por confirmar.'}`);
   }
 }
 

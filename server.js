@@ -398,17 +398,30 @@ async function analyzeWithOpenAI(imageData) {
   }
 }
 
-function buildDetectedVehicle(detected, fallback) {
-  const finalPlate = normalizePlate(detected?.plate || fallback.plate);
-  const confidence = Math.max(0, Math.min(1, Number(detected?.confidence) || (plateLooksColombian(finalPlate) ? 0.72 : 0.45)));
+function normalizeVehicleType(value) {
+  if (/moto/i.test(value || '')) return 'Moto';
+  if (/carro|auto|camioneta|vehiculo/i.test(value || '')) return 'Carro';
+  return null;
+}
+
+function cleanDetectedText(value) {
+  const text = String(value || '').trim();
+  if (!text || /^null|unknown|desconoc/i.test(text)) return null;
+  return text.slice(0, 40);
+}
+
+function buildDetectedVehicle(detected, fallback = null) {
+  const hasImageDetection = Boolean(detected?.plate);
+  const finalPlate = normalizePlate(detected?.plate || fallback?.plate || '');
+  const confidence = Math.max(0, Math.min(1, Number(detected?.confidence) || (hasImageDetection ? 0.68 : 0)));
   return {
-    plate: finalPlate,
-    type: detected?.type || fallback.type,
-    color: detected?.color || fallback.color,
-    make: detected?.make || fallback.make,
+    plate: finalPlate || null,
+    type: normalizeVehicleType(detected?.type) || fallback?.type || null,
+    color: cleanDetectedText(detected?.color) || fallback?.color || null,
+    make: cleanDetectedText(detected?.make) || fallback?.make || null,
     confidence,
-    plate_format_ok: plateLooksColombian(finalPlate),
-    source: detected?.plate ? 'openai_vision' : 'demo_fallback'
+    plate_format_ok: finalPlate ? plateLooksColombian(finalPlate) : false,
+    source: hasImageDetection ? 'openai_vision' : (fallback ? 'demo_fallback' : 'no_detection')
   };
 }
 
@@ -422,14 +435,13 @@ app.get('/api/state', async (_req, res) => {
 
 app.post('/api/detect', async (req, res) => {
   const { imageData } = req.body || {};
-  const fallback = demoPlates[Math.floor(Math.random() * demoPlates.length)];
   let detected = null;
   try {
     detected = await analyzeWithOpenAI(imageData);
   } catch (err) {
     detected = null;
   }
-  res.json(buildDetectedVehicle(detected, fallback));
+  res.json(buildDetectedVehicle(detected));
 });
 
 app.post('/api/scan', async (req, res) => {
@@ -441,13 +453,13 @@ app.post('/api/scan', async (req, res) => {
     detected = null;
   }
   const fallback = demoPlates[Math.floor(Math.random() * demoPlates.length)];
-  const ai = buildDetectedVehicle(detected, fallback);
-  const finalPlate = normalizePlate(plate || ai.plate);
+  const ai = buildDetectedVehicle(detected, plate ? null : fallback);
+  const finalPlate = normalizePlate(plate || ai.plate || fallback.plate);
   const input = {
     plate: finalPlate,
-    type: type || ai.type,
-    color: ai.color,
-    make: ai.make,
+    type: type || ai.type || 'Carro',
+    color: ai.color || 'Por confirmar',
+    make: ai.make || 'Por confirmar',
     service: service || fallback.service,
     owner: fallback.owner,
     confidence: plate ? 0.99 : ai.confidence,
