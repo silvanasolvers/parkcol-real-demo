@@ -9,8 +9,16 @@ let capturedImage = '';
 let autoDetectTimer = null;
 let detecting = false;
 let lastDetectedPlate = '';
+let detectionLocked = false;
 
 const app = $('#app');
+const DETECTION_CROPS = [
+  { id: 'full-frame', x: 0, y: 0, w: 1, h: 1, targetWidth: 1600 },
+  { id: 'center-wide', x: 0.08, y: 0.18, w: 0.84, h: 0.58, targetWidth: 1600 },
+  { id: 'center-tight', x: 0.22, y: 0.25, w: 0.56, h: 0.42, targetWidth: 1600 },
+  { id: 'lower-wide', x: 0.06, y: 0.36, w: 0.88, h: 0.48, targetWidth: 1600 },
+  { id: 'lower-tight', x: 0.18, y: 0.42, w: 0.64, h: 0.34, targetWidth: 1600 }
+];
 
 function plateList() {
   return state?.vehicles || [];
@@ -91,7 +99,7 @@ function renderDashboard() {
               <span class="eyebrow">Entrada</span>
               <h1>Captura de placa</h1>
             </div>
-            <span class="status-dot ${stream ? 'ok' : ''}" id="cameraStatus">${stream ? 'Detector activo' : 'Camara web'}</span>
+            <span class="status-dot ${stream ? 'ok' : ''}" id="cameraStatus">${detectionLocked ? 'Lectura bloqueada' : stream ? 'Detector activo' : 'Camara web'}</span>
           </div>
           <div class="camera-box">
             <video id="camera" autoplay playsinline muted></video>
@@ -103,6 +111,7 @@ function renderDashboard() {
           <div class="scan-controls">
             <button class="secondary" id="startCamera">Abrir cámara</button>
             <button class="secondary" id="capture">Detectar ahora</button>
+            <button class="ghost" id="resumeDetection">Seguir detectando</button>
             <button class="ghost" id="simulate">Simular lectura</button>
           </div>
           <div class="plate-form">
@@ -242,7 +251,8 @@ function bindDashboard() {
   $('#refresh').onclick = refresh;
   $('#closeShift').onclick = closeShift;
   $('#startCamera').onclick = startCamera;
-  $('#capture').onclick = captureFrame;
+  $('#capture').onclick = () => detectCurrentFrame(false);
+  $('#resumeDetection').onclick = resumeDetection;
   $('#simulate').onclick = simulateRead;
   $('#registerEntry').onclick = registerEntry;
   $('#makeQr').onclick = makeQr;
@@ -266,10 +276,19 @@ async function bootCameraElement() {
 
 async function startCamera() {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 30, max: 30 }
+      },
+      audio: false
+    });
+    await tuneCameraTrack(stream);
     $('#camera').srcObject = stream;
-    setResult('Detector activo. Buscando placa automáticamente...');
-    $('#cameraStatus').textContent = 'Detector activo';
+    setResult('Detector activo en alta resolución. Buscando placa automáticamente...');
+    $('#cameraStatus').textContent = 'Detector activo HD';
     $('#cameraStatus').classList.add('ok');
     startAutoDetect();
   } catch {
@@ -277,38 +296,84 @@ async function startCamera() {
   }
 }
 
+async function tuneCameraTrack(cameraStream) {
+  const [track] = cameraStream.getVideoTracks();
+  if (!track?.getCapabilities || !track.applyConstraints) return;
+  const caps = track.getCapabilities();
+  const advanced = [];
+  if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+    advanced.push({ focusMode: 'continuous' });
+  }
+  if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
+    advanced.push({ exposureMode: 'continuous' });
+  }
+  if (advanced.length) {
+    await track.applyConstraints({ advanced }).catch(() => {});
+  }
+}
+
 function captureFrame(silent = false) {
+  const bundle = captureFrameBundle(silent);
+  return bundle?.imageData || '';
+}
+
+function captureFrameBundle(silent = false) {
   const video = $('#camera');
   const canvas = $('#snapshot');
-  const ctx = canvas.getContext('2d');
   if (!video.videoWidth) {
     if (!silent) setResult('Abre la cámara primero o usa simulación.');
-    return '';
+    return null;
   }
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  ctx.drawImage(video, 0, 0);
-  capturedImage = canvas.toDataURL('image/jpeg', 0.75);
-  if (!silent) detectCurrentFrame();
-  return capturedImage;
+  const images = DETECTION_CROPS.map((crop) => renderDetectionCrop(video, canvas, crop)).filter(Boolean);
+  capturedImage = images[0]?.imageData || '';
+  return { imageData: capturedImage, images };
+}
+
+function renderDetectionCrop(video, canvas, crop) {
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+  const sx = Math.max(0, Math.round(sourceWidth * crop.x));
+  const sy = Math.max(0, Math.round(sourceHeight * crop.y));
+  const sw = Math.min(sourceWidth - sx, Math.round(sourceWidth * crop.w));
+  const sh = Math.min(sourceHeight - sy, Math.round(sourceHeight * crop.h));
+  if (sw < 80 || sh < 60) return null;
+  const aspect = sw / sh;
+  const targetWidth = Math.min(crop.targetWidth, Math.max(sw, 960));
+  const targetHeight = Math.round(targetWidth / aspect);
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
+  return {
+    id: crop.id,
+    source: { x: crop.x, y: crop.y, w: crop.w, h: crop.h },
+    imageData: canvas.toDataURL('image/jpeg', 0.86)
+  };
 }
 
 function startAutoDetect() {
   if (autoDetectTimer) clearInterval(autoDetectTimer);
+  if (detectionLocked) return;
   setTimeout(() => detectCurrentFrame(true), 900);
   autoDetectTimer = setInterval(() => detectCurrentFrame(true), 3200);
 }
 
 async function detectCurrentFrame(auto = false) {
+  if (detectionLocked) {
+    if (!auto) setResult('Lectura bloqueada. Toca "Seguir detectando" para buscar otra placa.');
+    return;
+  }
   if (detecting) return;
-  const imageData = captureFrame(true);
-  if (!imageData) return;
+  const frame = captureFrameBundle(true);
+  if (!frame?.imageData) return;
   detecting = true;
-  if (!auto) setResult('Analizando placa...');
+  if (!auto) setResult('Analizando placa con recortes de alta resolución...');
   try {
     const detected = await api('/api/detect', {
       method: 'POST',
-      body: JSON.stringify({ imageData })
+      body: JSON.stringify(frame)
     });
     applyDetection(detected, auto);
   } catch {
@@ -338,14 +403,33 @@ function applyDetection(detected, auto) {
   const details = [detected.type, detected.color, makeLabel].filter(Boolean).join(' · ');
   const changed = lastDetectedPlate !== detected.plate;
   lastDetectedPlate = detected.plate;
+  lockDetection();
   if (changed || !auto) {
-    setResult(`Placa detectada automáticamente: ${detected.plate} (${pct}%). ${details || 'Tipo/color/marca por confirmar.'}`);
+    setResult(`Lectura bloqueada: ${detected.plate} (${pct}%). ${details || 'Tipo/color/marca por confirmar.'}`);
   }
+}
+
+function lockDetection() {
+  detectionLocked = true;
+  if (autoDetectTimer) clearInterval(autoDetectTimer);
+  autoDetectTimer = null;
+  const status = $('#cameraStatus');
+  if (status) status.textContent = 'Lectura bloqueada';
+}
+
+function resumeDetection() {
+  detectionLocked = false;
+  lastDetectedPlate = '';
+  const status = $('#cameraStatus');
+  if (status && stream) status.textContent = 'Detector activo HD';
+  setResult('Detector activo. Buscando otra placa...');
+  startAutoDetect();
 }
 
 function simulateRead() {
   const samples = ['KLM428', 'RFT21E', 'MBO739', 'VNS84F', 'JQX615', 'TUP33G'];
   $('#plateInput').value = samples[Math.floor(Math.random() * samples.length)];
+  lockDetection();
   setResult('Lectura simulada con formato colombiano.');
 }
 

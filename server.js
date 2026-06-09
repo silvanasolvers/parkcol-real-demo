@@ -15,7 +15,7 @@ const DATABASE_URL = process.env.DATABASE_URL || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '25mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const demoPlates = [
@@ -376,8 +376,29 @@ class PostgresStore extends MemoryStore {
 
 const store = DATABASE_URL ? new PostgresStore(DATABASE_URL) : new MemoryStore();
 
-async function analyzeWithOpenAI(imageData) {
-  if (!process.env.OPENAI_API_KEY || !imageData?.startsWith('data:image')) return null;
+function normalizeDetectionImages(input) {
+  const images = [];
+  const add = (item, fallbackId) => {
+    const imageData = typeof item === 'string' ? item : item?.imageData;
+    if (!imageData?.startsWith('data:image')) return;
+    if (images.some((image) => image.imageData === imageData)) return;
+    images.push({
+      id: cleanDetectedText(item?.id) || fallbackId,
+      imageData
+    });
+  };
+  add(input?.imageData || input, 'full-frame');
+  (input?.images || []).forEach((image, index) => add(image, `crop-${index + 1}`));
+  return images.slice(0, 6);
+}
+
+async function analyzeWithOpenAI(input) {
+  const images = normalizeDetectionImages(input);
+  if (!process.env.OPENAI_API_KEY || !images.length) return null;
+  const imageContent = images.flatMap((image, index) => ([
+    { type: 'input_text', text: `Imagen ${index + 1}: ${image.id}` },
+    { type: 'input_image', image_url: image.imageData }
+  ]));
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
@@ -393,16 +414,18 @@ async function analyzeWithOpenAI(imageData) {
             type: 'input_text',
             text: [
               'Eres un detector ALPR para un demo de parqueadero en Colombia.',
-              'Lee la placa visible del vehículo y detecta tipo, color y marca probable.',
+              'Recibiras varias imagenes del mismo instante: una toma completa y recortes ampliados.',
+              'Usa los recortes ampliados para leer placas lejanas o pequeñas, pero valida contra la toma completa para no confundir logos, señales o texto de fondo.',
+              'Lee la placa visible del vehículo principal y detecta tipo, color y marca probable.',
               'Para la marca, prioriza logo/emblema/insignia visible, texto de marca visible o parrilla/forma muy distintiva.',
               'No adivines marca solo por color, tamaño o forma genérica.',
               'Devuelve SOLO JSON valido sin markdown con estas llaves exactas:',
-              '{"plate": string|null, "type": "Carro"|"Moto"|null, "color": string|null, "make": string|null, "make_source": "logo"|"text"|"body_shape"|"uncertain"|null, "make_confidence": number, "confidence": number}',
+              '{"plate": string|null, "type": "Carro"|"Moto"|null, "color": string|null, "make": string|null, "make_source": "logo"|"text"|"body_shape"|"uncertain"|null, "make_confidence": number, "confidence": number, "crop_used": string|null}',
               'Usa formatos colombianos: carros ABC123, motos ABC12D. Si no ves una placa clara, plate debe ser null y confidence menor a 0.55.',
               `Marcas permitidas o esperadas: ${knownMakes.join(', ')}. Si la marca no está clara, make debe ser null, make_source "uncertain" y make_confidence menor a 0.65.`
             ].join(' ')
           },
-          { type: 'input_image', image_url: imageData }
+          ...imageContent
         ]
       }]
     })
@@ -479,10 +502,10 @@ app.get('/api/state', async (_req, res) => {
 });
 
 app.post('/api/detect', async (req, res) => {
-  const { imageData } = req.body || {};
+  const { imageData, images } = req.body || {};
   let detected = null;
   try {
-    detected = await analyzeWithOpenAI(imageData);
+    detected = await analyzeWithOpenAI({ imageData, images });
   } catch (err) {
     detected = null;
   }
