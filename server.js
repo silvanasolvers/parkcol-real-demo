@@ -389,7 +389,13 @@ function normalizeDetectionImages(input) {
   };
   add(input?.imageData || input, 'full-frame');
   (input?.images || []).forEach((image, index) => add(image, `crop-${index + 1}`));
-  return images.slice(0, 6);
+  return images.slice(0, 3);
+}
+
+function extractPlateCandidate(text = '') {
+  const normalized = String(text).toUpperCase();
+  const match = normalized.match(/\b[A-Z]{3}[\s-]?\d{3}\b|\b[A-Z]{3}[\s-]?\d{2}[A-Z]\b/);
+  return match ? normalizePlate(match[0]) : null;
 }
 
 async function analyzeWithOpenAI(input) {
@@ -414,9 +420,11 @@ async function analyzeWithOpenAI(input) {
             type: 'input_text',
             text: [
               'Eres un detector ALPR para un demo de parqueadero en Colombia.',
-              'Recibiras varias imagenes del mismo instante: una toma completa y recortes ampliados.',
-              'Usa los recortes ampliados para leer placas lejanas o pequeñas, pero valida contra la toma completa para no confundir logos, señales o texto de fondo.',
-              'Lee la placa visible del vehículo principal y detecta tipo, color y marca probable.',
+              'Tu prioridad absoluta es OCR de placa. Lee letras y numeros de la placa del vehiculo principal.',
+              'Recibiras maximo tres imagenes del mismo instante: toma completa, zona de placa y zona de placa mejorada para OCR.',
+              'Usa la imagen plate-zone-ocr para leer caracteres, y valida contra la toma completa para no confundir texto de fondo.',
+              'Si la placa se ve parcialmente pero el formato colombiano es claro, devuelve tu mejor lectura con confianza acorde.',
+              'Despues detecta tipo, color y marca probable solo si se ve claro.',
               'Para la marca, prioriza logo/emblema/insignia visible, texto de marca visible o parrilla/forma muy distintiva.',
               'No adivines marca solo por color, tamaño o forma genérica.',
               'Devuelve SOLO JSON valido sin markdown con estas llaves exactas:',
@@ -436,7 +444,8 @@ async function analyzeWithOpenAI(input) {
   try {
     return JSON.parse(text.replace(/^```json|```$/g, '').trim());
   } catch {
-    return null;
+    const plate = extractPlateCandidate(text);
+    return plate ? { plate, type: null, color: null, make: null, make_source: 'uncertain', make_confidence: 0, confidence: 0.62 } : null;
   }
 }
 
@@ -507,7 +516,8 @@ app.post('/api/detect', async (req, res) => {
   try {
     detected = await analyzeWithOpenAI({ imageData, images });
   } catch (err) {
-    detected = null;
+    console.error('detect_failed', err.message);
+    return res.status(502).json({ error: 'detect_failed', message: 'vision_error' });
   }
   res.json(buildDetectedVehicle(detected));
 });

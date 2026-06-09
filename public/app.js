@@ -13,11 +13,9 @@ let detectionLocked = false;
 
 const app = $('#app');
 const DETECTION_CROPS = [
-  { id: 'full-frame', x: 0, y: 0, w: 1, h: 1, targetWidth: 1600 },
-  { id: 'center-wide', x: 0.08, y: 0.18, w: 0.84, h: 0.58, targetWidth: 1600 },
-  { id: 'center-tight', x: 0.22, y: 0.25, w: 0.56, h: 0.42, targetWidth: 1600 },
-  { id: 'lower-wide', x: 0.06, y: 0.36, w: 0.88, h: 0.48, targetWidth: 1600 },
-  { id: 'lower-tight', x: 0.18, y: 0.42, w: 0.64, h: 0.34, targetWidth: 1600 }
+  { id: 'full-frame', x: 0, y: 0, w: 1, h: 1, targetWidth: 1180, quality: 0.68 },
+  { id: 'plate-zone', x: 0.08, y: 0.28, w: 0.84, h: 0.46, targetWidth: 1280, quality: 0.74 },
+  { id: 'plate-zone-ocr', x: 0.16, y: 0.34, w: 0.68, h: 0.34, targetWidth: 1400, quality: 0.78, enhance: true }
 ];
 
 function plateList() {
@@ -345,11 +343,13 @@ function renderDetectionCrop(video, canvas, crop) {
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
+  ctx.filter = crop.enhance ? 'grayscale(1) contrast(1.45) brightness(1.08)' : 'none';
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, targetWidth, targetHeight);
+  ctx.filter = 'none';
   return {
     id: crop.id,
     source: { x: crop.x, y: crop.y, w: crop.w, h: crop.h },
-    imageData: canvas.toDataURL('image/jpeg', 0.86)
+    imageData: canvas.toDataURL('image/jpeg', crop.quality)
   };
 }
 
@@ -369,15 +369,16 @@ async function detectCurrentFrame(auto = false) {
   const frame = captureFrameBundle(true);
   if (!frame?.imageData) return;
   detecting = true;
-  if (!auto) setResult('Analizando placa con recortes de alta resolución...');
+  if (!auto) setResult('Analizando placa con OCR visual...');
   try {
     const detected = await api('/api/detect', {
       method: 'POST',
       body: JSON.stringify(frame)
     });
     applyDetection(detected, auto);
-  } catch {
-    if (!auto) setResult('No pude detectar la placa en esta toma. Acerca más la cámara.');
+  } catch (err) {
+    const reason = err?.data?.message || err?.message || 'error';
+    if (!auto) setResult(`No pude detectar la placa en esta toma (${reason}).`);
   } finally {
     detecting = false;
   }
