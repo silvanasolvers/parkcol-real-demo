@@ -332,7 +332,10 @@ function applyDetection(detected, auto) {
     serviceInput.value = serviceInput.value || 'Horas';
   }
   const pct = Math.round(Number(detected.confidence || 0) * 100);
-  const details = [detected.type, detected.color, detected.make].filter(Boolean).join(' · ');
+  const makeLabel = detected.make
+    ? `${detected.make}${detected.make_source === 'logo' ? ' (logo)' : detected.make_source === 'text' ? ' (texto)' : ''}`
+    : null;
+  const details = [detected.type, detected.color, makeLabel].filter(Boolean).join(' · ');
   const changed = lastDetectedPlate !== detected.plate;
   lastDetectedPlate = detected.plate;
   if (changed || !auto) {

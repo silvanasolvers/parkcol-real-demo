@@ -32,6 +32,22 @@ const tariffs = {
   Moto: { hourly: 3000, dayCap: 18000, overnight: 15000, valet: 0 }
 };
 
+const knownMakes = [
+  'Renault', 'Chevrolet', 'Mazda', 'Toyota', 'Kia', 'Hyundai', 'Nissan', 'Volkswagen', 'Ford', 'Suzuki',
+  'Honda', 'Mitsubishi', 'Mercedes-Benz', 'BMW', 'Audi', 'Jeep', 'Dodge', 'Fiat', 'Peugeot', 'Citroen',
+  'Subaru', 'Volvo', 'Porsche', 'Land Rover', 'Mini', 'Seat', 'Skoda', 'Chery', 'JAC', 'Great Wall',
+  'Haval', 'BYD', 'Geely', 'MG', 'DFSK', 'Foton', 'Changan', 'Dongfeng', 'BAIC', 'SsangYong',
+  'Yamaha', 'AKT', 'Bajaj', 'TVS', 'Hero', 'Kymco', 'Auteco', 'Benelli', 'Kawasaki', 'Ducati',
+  'Harley-Davidson', 'Royal Enfield', 'CFMoto', 'Victory', 'Piaggio', 'Vespa', 'Aprilia', 'Husqvarna', 'KTM'
+];
+
+const makeAliases = new Map([
+  ['vw', 'Volkswagen'], ['volks wagon', 'Volkswagen'], ['mercedes', 'Mercedes-Benz'], ['mercedes benz', 'Mercedes-Benz'],
+  ['chevy', 'Chevrolet'], ['chev', 'Chevrolet'], ['citroën', 'Citroen'], ['landrover', 'Land Rover'],
+  ['harley davidson', 'Harley-Davidson'], ['harley', 'Harley-Davidson'], ['royal-enfield', 'Royal Enfield'],
+  ['cf moto', 'CFMoto'], ['cf-moto', 'CFMoto'], ['mg motor', 'MG'], ['greatwall', 'Great Wall']
+]);
+
 function id(prefix) {
   return `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -378,9 +394,12 @@ async function analyzeWithOpenAI(imageData) {
             text: [
               'Eres un detector ALPR para un demo de parqueadero en Colombia.',
               'Lee la placa visible del vehículo y detecta tipo, color y marca probable.',
+              'Para la marca, prioriza logo/emblema/insignia visible, texto de marca visible o parrilla/forma muy distintiva.',
+              'No adivines marca solo por color, tamaño o forma genérica.',
               'Devuelve SOLO JSON valido sin markdown con estas llaves exactas:',
-              '{"plate": string|null, "type": "Carro"|"Moto"|null, "color": string|null, "make": string|null, "confidence": number}',
-              'Usa formatos colombianos: carros ABC123, motos ABC12D. Si no ves una placa clara, plate debe ser null y confidence menor a 0.55.'
+              '{"plate": string|null, "type": "Carro"|"Moto"|null, "color": string|null, "make": string|null, "make_source": "logo"|"text"|"body_shape"|"uncertain"|null, "make_confidence": number, "confidence": number}',
+              'Usa formatos colombianos: carros ABC123, motos ABC12D. Si no ves una placa clara, plate debe ser null y confidence menor a 0.55.',
+              `Marcas permitidas o esperadas: ${knownMakes.join(', ')}. Si la marca no está clara, make debe ser null, make_source "uncertain" y make_confidence menor a 0.65.`
             ].join(' ')
           },
           { type: 'input_image', image_url: imageData }
@@ -410,15 +429,41 @@ function cleanDetectedText(value) {
   return text.slice(0, 40);
 }
 
+function normalizeMake(value) {
+  const text = cleanDetectedText(value);
+  if (!text) return null;
+  const compact = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (makeAliases.has(compact)) return makeAliases.get(compact);
+  const exact = knownMakes.find((make) => make.toLowerCase() === compact);
+  if (exact) return exact;
+  const loose = knownMakes.find((make) => make.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() === compact);
+  return loose || null;
+}
+
+function normalizeMakeSource(value) {
+  if (/logo|emblem|insignia|badge/i.test(value || '')) return 'logo';
+  if (/text|letra|word|nombre/i.test(value || '')) return 'text';
+  if (/body|shape|parrilla|forma|frontal/i.test(value || '')) return 'body_shape';
+  return 'uncertain';
+}
+
 function buildDetectedVehicle(detected, fallback = null) {
   const hasImageDetection = Boolean(detected?.plate);
   const finalPlate = normalizePlate(detected?.plate || fallback?.plate || '');
   const confidence = Math.max(0, Math.min(1, Number(detected?.confidence) || (hasImageDetection ? 0.68 : 0)));
+  const makeSource = normalizeMakeSource(detected?.make_source);
+  const makeConfidence = Math.max(0, Math.min(1, Number(detected?.make_confidence) || 0));
+  const normalizedMake = normalizeMake(detected?.make);
+  const reliableMake = normalizedMake && (
+    makeSource === 'logo' || makeSource === 'text' ? makeConfidence >= 0.7 : makeConfidence >= 0.86
+  );
   return {
     plate: finalPlate || null,
     type: normalizeVehicleType(detected?.type) || fallback?.type || null,
     color: cleanDetectedText(detected?.color) || fallback?.color || null,
-    make: cleanDetectedText(detected?.make) || fallback?.make || null,
+    make: reliableMake ? normalizedMake : (fallback?.make || null),
+    make_source: reliableMake ? makeSource : (fallback ? 'demo' : 'uncertain'),
+    make_confidence: reliableMake ? makeConfidence : 0,
     confidence,
     plate_format_ok: finalPlate ? plateLooksColombian(finalPlate) : false,
     source: hasImageDetection ? 'openai_vision' : (fallback ? 'demo_fallback' : 'no_detection')
@@ -465,7 +510,12 @@ app.post('/api/scan', async (req, res) => {
     confidence: plate ? 0.99 : ai.confidence,
     imageData,
     source: detected ? 'openai_vision' : (plate ? 'operator_confirmed' : 'demo_detection'),
-    metadata: { detected, plate_format_ok: plateLooksColombian(finalPlate) }
+    metadata: {
+      detected,
+      plate_format_ok: plateLooksColombian(finalPlate),
+      make_source: ai.make_source,
+      make_confidence: ai.make_confidence
+    }
   };
   const result = await store.createEntry(input);
   res.json({ ...result, plate_format_ok: plateLooksColombian(finalPlate), payment_url: `${PUBLIC_BASE_URL}/pagar/${result.payment.id}` });
