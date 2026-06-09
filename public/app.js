@@ -6,6 +6,9 @@ let stream = null;
 let selectedPlate = '';
 let lastPaymentUrl = '';
 let capturedImage = '';
+let autoDetectTimer = null;
+let detecting = false;
+let lastDetectedPlate = '';
 
 const app = $('#app');
 
@@ -88,7 +91,7 @@ function renderDashboard() {
               <span class="eyebrow">Entrada</span>
               <h1>Captura de placa</h1>
             </div>
-            <span class="status-dot">Camara web</span>
+            <span class="status-dot ${stream ? 'ok' : ''}" id="cameraStatus">${stream ? 'Detector activo' : 'Camara web'}</span>
           </div>
           <div class="camera-box">
             <video id="camera" autoplay playsinline muted></video>
@@ -99,7 +102,7 @@ function renderDashboard() {
           </div>
           <div class="scan-controls">
             <button class="secondary" id="startCamera">Abrir cámara</button>
-            <button class="secondary" id="capture">Capturar</button>
+            <button class="secondary" id="capture">Detectar ahora</button>
             <button class="ghost" id="simulate">Simular lectura</button>
           </div>
           <div class="plate-form">
@@ -137,7 +140,6 @@ function renderDashboard() {
               <strong>${selected?.plate || '-'}</strong>
             </div>
             <div>
-              <span>Estado</span>
               <strong>${selected?.status || '-'}</strong>
             </div>
             <div>
@@ -265,25 +267,76 @@ async function startCamera() {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
     $('#camera').srcObject = stream;
-    setResult('Cámara activa. Captura o confirma una placa.');
+    setResult('Detector activo. Buscando placa automáticamente...');
+    $('#cameraStatus').textContent = 'Detector activo';
+    $('#cameraStatus').classList.add('ok');
+    startAutoDetect();
   } catch {
     setResult('No se pudo abrir cámara. Usa simulación o escribe la placa.');
   }
 }
 
-function captureFrame() {
+function captureFrame(silent = false) {
   const video = $('#camera');
   const canvas = $('#snapshot');
   const ctx = canvas.getContext('2d');
   if (!video.videoWidth) {
-    setResult('Abre la cámara primero o usa simulación.');
-    return;
+    if (!silent) setResult('Abre la cámara primero o usa simulación.');
+    return '';
   }
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   ctx.drawImage(video, 0, 0);
   capturedImage = canvas.toDataURL('image/jpeg', 0.75);
-  setResult('Imagen capturada. Confirma placa y registra ingreso.');
+  if (!silent) detectCurrentFrame();
+  return capturedImage;
+}
+
+function startAutoDetect() {
+  if (autoDetectTimer) clearInterval(autoDetectTimer);
+  setTimeout(() => detectCurrentFrame(true), 900);
+  autoDetectTimer = setInterval(() => detectCurrentFrame(true), 3200);
+}
+
+async function detectCurrentFrame(auto = false) {
+  if (detecting) return;
+  const imageData = captureFrame(true);
+  if (!imageData) return;
+  detecting = true;
+  if (!auto) setResult('Analizando placa...');
+  try {
+    const detected = await api('/api/detect', {
+      method: 'POST',
+      body: JSON.stringify({ imageData })
+    });
+    applyDetection(detected, auto);
+  } catch {
+    if (!auto) setResult('No pude detectar la placa en esta toma. Acerca más la cámara.');
+  } finally {
+    detecting = false;
+  }
+}
+
+function applyDetection(detected, auto) {
+  if (!detected?.plate) {
+    if (!auto) setResult('No hay placa clara en cámara.');
+    return;
+  }
+  const plateInput = $('#plateInput');
+  const typeInput = $('#typeInput');
+  const serviceInput = $('#serviceInput');
+  plateInput.value = detected.plate;
+  typeInput.value = detected.type || typeInput.value;
+  if (detected.source === 'openai_vision' && detected.confidence >= 0.78) {
+    serviceInput.value = serviceInput.value || 'Horas';
+  }
+  const pct = Math.round(Number(detected.confidence || 0) * 100);
+  const details = [detected.type, detected.color, detected.make].filter(Boolean).join(' · ');
+  const changed = lastDetectedPlate !== detected.plate;
+  lastDetectedPlate = detected.plate;
+  if (changed || !auto) {
+    setResult(`Placa detectada automáticamente: ${detected.plate} (${pct}%). ${details}`);
+  }
 }
 
 function simulateRead() {

@@ -360,8 +360,7 @@ class PostgresStore extends MemoryStore {
 
 const store = DATABASE_URL ? new PostgresStore(DATABASE_URL) : new MemoryStore();
 
-async function analyzeWithOpenAI(imageData, manualPlate) {
-  if (manualPlate) return null;
+async function analyzeWithOpenAI(imageData) {
   if (!process.env.OPENAI_API_KEY || !imageData?.startsWith('data:image')) return null;
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -374,7 +373,16 @@ async function analyzeWithOpenAI(imageData, manualPlate) {
       input: [{
         role: 'user',
         content: [
-          { type: 'input_text', text: 'Analiza este vehiculo para demo de parqueadero en Colombia. Devuelve SOLO JSON con plate, type, color, make, confidence. Si no lees placa, usa plate null.' },
+          {
+            type: 'input_text',
+            text: [
+              'Eres un detector ALPR para un demo de parqueadero en Colombia.',
+              'Lee la placa visible del vehículo y detecta tipo, color y marca probable.',
+              'Devuelve SOLO JSON valido sin markdown con estas llaves exactas:',
+              '{"plate": string|null, "type": "Carro"|"Moto"|null, "color": string|null, "make": string|null, "confidence": number}',
+              'Usa formatos colombianos: carros ABC123, motos ABC12D. Si no ves una placa clara, plate debe ser null y confidence menor a 0.55.'
+            ].join(' ')
+          },
           { type: 'input_image', image_url: imageData }
         ]
       }]
@@ -390,6 +398,20 @@ async function analyzeWithOpenAI(imageData, manualPlate) {
   }
 }
 
+function buildDetectedVehicle(detected, fallback) {
+  const finalPlate = normalizePlate(detected?.plate || fallback.plate);
+  const confidence = Math.max(0, Math.min(1, Number(detected?.confidence) || (plateLooksColombian(finalPlate) ? 0.72 : 0.45)));
+  return {
+    plate: finalPlate,
+    type: detected?.type || fallback.type,
+    color: detected?.color || fallback.color,
+    make: detected?.make || fallback.make,
+    confidence,
+    plate_format_ok: plateLooksColombian(finalPlate),
+    source: detected?.plate ? 'openai_vision' : 'demo_fallback'
+  };
+}
+
 app.get('/api/health', async (_req, res) => {
   res.json({ ok: true, mode: DATABASE_URL ? 'postgres' : 'memory' });
 });
@@ -398,24 +420,37 @@ app.get('/api/state', async (_req, res) => {
   res.json(await store.state());
 });
 
+app.post('/api/detect', async (req, res) => {
+  const { imageData } = req.body || {};
+  const fallback = demoPlates[Math.floor(Math.random() * demoPlates.length)];
+  let detected = null;
+  try {
+    detected = await analyzeWithOpenAI(imageData);
+  } catch (err) {
+    detected = null;
+  }
+  res.json(buildDetectedVehicle(detected, fallback));
+});
+
 app.post('/api/scan', async (req, res) => {
   const { imageData, plate, type, service } = req.body || {};
   let detected = null;
   try {
-    detected = await analyzeWithOpenAI(imageData, plate);
+    detected = plate ? null : await analyzeWithOpenAI(imageData);
   } catch (err) {
     detected = null;
   }
   const fallback = demoPlates[Math.floor(Math.random() * demoPlates.length)];
-  const finalPlate = normalizePlate(plate || detected?.plate || fallback.plate);
+  const ai = buildDetectedVehicle(detected, fallback);
+  const finalPlate = normalizePlate(plate || ai.plate);
   const input = {
     plate: finalPlate,
-    type: type || detected?.type || fallback.type,
-    color: detected?.color || fallback.color,
-    make: detected?.make || fallback.make,
+    type: type || ai.type,
+    color: ai.color,
+    make: ai.make,
     service: service || fallback.service,
     owner: fallback.owner,
-    confidence: plate ? 0.99 : (Number(detected?.confidence) || (plateLooksColombian(finalPlate) ? 0.93 : 0.74)),
+    confidence: plate ? 0.99 : ai.confidence,
     imageData,
     source: detected ? 'openai_vision' : (plate ? 'operator_confirmed' : 'demo_detection'),
     metadata: { detected, plate_format_ok: plateLooksColombian(finalPlate) }
