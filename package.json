@@ -1,0 +1,20 @@
+{
+  "name": "parkcol-real-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Demo funcional Parkcol: placas, QR, pago simulado, salida y cierres",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js",
+    "check": "node --check server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.13.1",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
