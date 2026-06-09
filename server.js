@@ -487,7 +487,7 @@ function buildDetectedVehicle(detected, fallback = null) {
   const makeConfidence = Math.max(0, Math.min(1, Number(detected?.make_confidence) || 0));
   const normalizedMake = normalizeMake(detected?.make);
   const reliableMake = normalizedMake && (
-    makeSource === 'logo' || makeSource === 'text' ? makeConfidence >= 0.9 : makeConfidence >= 0.96
+    makeSource === 'logo' || makeSource === 'text' ? makeConfidence >= 0.7 : makeConfidence >= 0.86
   );
   return {
     plate: finalPlate || null,
